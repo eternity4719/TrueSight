@@ -1,12 +1,9 @@
 package me.albert.truesight;
 
 import com.mojang.blaze3d.pipeline.RenderPipeline;
-import com.mojang.blaze3d.vertex.DefaultVertexFormat;
-import com.mojang.blaze3d.vertex.VertexFormat;
 import net.minecraft.client.renderer.RenderPipelines;
 import net.minecraft.client.renderer.rendertype.RenderSetup;
 import net.minecraft.client.renderer.rendertype.RenderType;
-import net.minecraft.resources.Identifier;
 
 import java.util.Optional;
 
@@ -18,8 +15,7 @@ public final class TrueSightRenderTypes {
 
     public static final RenderPipeline ESP_QUADS_PIPELINE = RenderPipelines.register(
             RenderPipeline.builder(RenderPipelines.DEBUG_FILLED_SNIPPET)
-                    .withLocation(Identifier.fromNamespaceAndPath("truesight", "pipeline/esp_quads"))
-                    .withVertexFormat(DefaultVertexFormat.POSITION_COLOR, VertexFormat.Mode.QUADS)
+                    .withLocation("truesight:pipeline/esp_quads")
                     .withDepthStencilState(Optional.empty())
                     .withCull(false)
                     .build());

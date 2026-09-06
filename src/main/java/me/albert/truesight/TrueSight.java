@@ -4,11 +4,12 @@ import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.blaze3d.vertex.VertexConsumer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientChunkEvents;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
+import net.fabricmc.fabric.api.client.rendering.v1.level.LevelRenderContext;
+import net.fabricmc.fabric.api.client.rendering.v1.level.LevelRenderEvents;
 import net.minecraft.ChatFormatting;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.player.LocalPlayer;
-import net.minecraft.client.renderer.MultiBufferSource;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.core.Vec3i;
@@ -110,6 +111,7 @@ public final class TrueSight {
         ClientTickEvents.END_CLIENT_TICK.register(client -> tick());
         ClientChunkEvents.CHUNK_LOAD.register((level, chunk) -> forgetChunk(chunk));
         ClientChunkEvents.CHUNK_UNLOAD.register((level, chunk) -> forgetChunk(chunk));
+        LevelRenderEvents.COLLECT_SUBMITS.register(TrueSight::onRender);
     }
 
     private static List<Vec3i> buildBall(int r) {
@@ -208,7 +210,9 @@ public final class TrueSight {
     }
 
     private static void log(String msg, ChatFormatting color) {
-        MC.gui.getChat().addClientSystemMessage(Component.literal(msg).withStyle(color));
+        LocalPlayer player = MC.player;
+        if (player == null) return;
+        player.sendSystemMessage(Component.literal(msg).withStyle(color));
     }
 
     // ===== 收包:服务器发来的方块更新才是真方块(客户端主线程,见 ClientPacketListenerMixin) =====
@@ -372,8 +376,11 @@ public final class TrueSight {
 
     // ===== 渲染 =====
 
-    /** 渲染线程调用(见 LevelRendererMixin),stack 已乘好相机矩阵,顶点坐标相对相机位置。 */
-    public static void onRender(PoseStack stack) {
+    /**
+     * Fabric LevelRenderEvents.COLLECT_SUBMITS 回调:把高亮方块作为自定义几何体交给原版的 submit 管线画。
+     * 上下文里的 PoseStack 以相机为原点,顶点坐标要减掉相机位置。
+     */
+    private static void onRender(LevelRenderContext ctx) {
         ClientLevel level = MC.level;
         if (!running || level == null || displayedOres.isEmpty()) return;
 
@@ -381,13 +388,12 @@ public final class TrueSight {
         displayedOres.removeIf(pos -> !ORE_BLOCKS.contains(level.getBlockState(pos).getBlock()));
         if (displayedOres.isEmpty()) return;
 
-        Vec3 cam = MC.gameRenderer.getMainCamera().position();
-        MultiBufferSource.BufferSource bufferSource = MC.renderBuffers().bufferSource();
-        VertexConsumer buf = bufferSource.getBuffer(TrueSightRenderTypes.ESP_QUADS);
-        for (BlockPos pos : displayedOres) {
-            fillBox(stack.last(), buf, (float) (pos.getX() - cam.x), (float) (pos.getY() - cam.y), (float) (pos.getZ() - cam.z));
-        }
-        bufferSource.endBatch(TrueSightRenderTypes.ESP_QUADS);
+        Vec3 cam = ctx.levelState().cameraRenderState.pos;
+        ctx.submitNodeCollector().submitCustomGeometry(ctx.poseStack(), TrueSightRenderTypes.ESP_QUADS, (pose, buf) -> {
+            for (BlockPos pos : displayedOres) {
+                fillBox(pose, buf, (float) (pos.getX() - cam.x), (float) (pos.getY() - cam.y), (float) (pos.getZ() - cam.z));
+            }
+        });
     }
 
     /** 以 (minX, minY, minZ) 为角的单位立方体,六个面各一个四边形。 */

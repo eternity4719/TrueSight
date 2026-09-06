@@ -1,6 +1,6 @@
 # TrueSight(真视)
 
-Fabric 客户端 mod(Minecraft 26.1.2),针对 Paper 系服务端(Paper / Folia / Canvas)的反矿透(Anti-Xray):
+Fabric 客户端 mod(Minecraft 26.1 及以上,一个 jar 通吃 26.1.x / 26.2),针对 Paper 系服务端(Paper / Folia / Canvas)的反矿透(Anti-Xray):
 批量发挖掘动作包,让服务器把身边方块的真实状态回给客户端,然后把揭示出来的**深层钻石矿**画成绿色透视方块。
 
 ## 用法
@@ -40,6 +40,16 @@ Fabric 客户端 mod(Minecraft 26.1.2),针对 Paper 系服务端(Paper / Folia /
    radius=1 的球和点阵,并在聊天栏提示一次。
 6. 整个流程挂在客户端 tick 上走状态机:规划 → 分批发包 → 等回包 → 结算 → 歇息,全在主线程,没有线程和 sleep。
 
+## 版本兼容
+
+- **一个 jar 覆盖 26.1.x 和 26.2**(`fabric.mod.json` 里 `minecraft >= 26.1`),分别对着 26.1.2 和 26.2 编译验证过。
+  26.1 起原版不再混淆,类名方法名直接可用;发包、收包、区块、交互距离这些 API 在 26.1.1 → 26.2 之间一字未改。
+- 唯一逐版本变的是渲染:26.2 删掉了 `MultiBufferSource`、改了 `LevelRenderer.renderLevel` 签名和管线 builder。
+  所以渲染不写 mixin,走 Fabric API 的 `LevelRenderEvents.COLLECT_SUBMITS` + `submitCustomGeometry`,管线直接继承原版
+  `DEBUG_FILLED_SNIPPET`(顶点格式跟着它走,不自己指定),这两条在两个版本里签名一致。
+- 1.21.x 不在范围内:那边还是混淆的,`ResourceLocation`、`RenderType` 包名、Fabric 的 `WorldRenderEvents` 都不一样,
+  还要 Java 21,想兼容得上 Stonecutter 之类的多版本预处理,不值得。
+
 ## 构建
 
 Gradle + fabric-loom,Java 25。在 IDEA 里跑 `build` 出包,或:
@@ -48,14 +58,13 @@ Gradle + fabric-loom,Java 25。在 IDEA 里跑 `build` 出包,或:
 ./gradlew build
 ```
 
-产物在 `build/libs/`。依赖 Fabric API。
+产物在 `build/libs/`。依赖 Fabric API。想对着别的版本编译,改 `gradle.properties` 里的 `minecraft_version` 和 `fabric_api_version` 即可,源码不用动。
 
 ## 源码
 
 | 文件 | 作用 |
 |------|------|
-| `TrueSight.java` | 状态机、发包规划、收包登记、渲染 |
+| `TrueSight.java` | 状态机、发包规划、收包登记、渲染(挂 Fabric `LevelRenderEvents`) |
 | `TrueSightMod.java` | 入口,注册 `/truesight` 命令,断线时停掉 |
 | `TrueSightRenderTypes.java` | 透视用的 RenderType(深度测试关掉的填充四边形) |
-| `mixin/ClientPacketListenerMixin.java` | 截获服务器的方块更新包 |
-| `mixin/LevelRendererMixin.java` | 世界渲染完毕后补画高亮 |
+| `mixin/ClientPacketListenerMixin.java` | 截获服务器的方块更新包(唯一的 mixin) |
