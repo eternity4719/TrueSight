@@ -3,7 +3,7 @@
 	"id": "truesight",
 	"version": "${version}",
 	"name": "TrueSight",
-	"description": "真视:批量发包剥掉反矿透伪装,透视高亮深层钻石矿(/truesight)",
+	"description": "真视:批量发包剥掉反矿透伪装,透视高亮深层钻石矿和远古残骸(/truesight)",
 	"authors": ["Albert"],
 	"license": "MIT",
 	"environment": "client",

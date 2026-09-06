@@ -51,7 +51,7 @@ import java.util.Set;
  * 服务器的 update-radius 不用猜:按收到的更新相对本轮目标格的距离统计,只见距离 1 从不见距离 2 就切到 radius=1 的球和点阵。
  * 服务器重发区块(客户端 CHUNK_LOAD/UNLOAD)时那块的记录作废,回到伪装状态,下一轮自然重发。
  * 整个流程挂在客户端 tick 上走状态机:规划 → 分批发包 → 等回包 → 结算 → 歇息,全在主线程,没有线程和 sleep。
- * 揭示出来的深层钻石矿画成绿色透视方块。
+ * 揭示出来的目标矿(深层钻石矿绿色、远古残骸橙色)画成透视方块。
  */
 public final class TrueSight {
 
@@ -69,16 +69,16 @@ public final class TrueSight {
     /** 判定服务器 update-radius=1 所需的证据:收到这么多距离 1 的更新、且一个距离 2 的都没有。 */
     private static final int RADIUS1_EVIDENCE = 20;
 
-    // 目标矿石:深层钻石矿
-    private static final Set<Block> ORE_BLOCKS = Set.of(Blocks.DEEPSLATE_DIAMOND_ORE);
+    // 目标矿石 → 高亮颜色(ARGB,透明度 0.4):深层钻石矿绿色,远古残骸橙色
+    private static final Map<Block, Integer> ORE_COLORS = Map.of(
+            Blocks.DEEPSLATE_DIAMOND_ORE, 0x6600FF00,
+            Blocks.ANCIENT_DEBRIS, 0x66FF8000
+    );
 
     /** update-radius=2 时一个目标格揭示的 24 个偏移:曼哈顿距离 1~2。 */
     private static final List<Vec3i> BALL_2 = buildBall(2);
     /** update-radius=1 时揭示的 6 个面邻居。 */
     private static final List<Vec3i> BALL_1 = buildBall(1);
-
-    // ARGB:绿色,透明度 0.4
-    private static final int HIGHLIGHT_COLOR = 0x6600FF00;
 
     // ===== 运行状态(只在客户端主线程读写) =====
     private static boolean running;
@@ -221,7 +221,7 @@ public final class TrueSight {
         if (!running) return;
         BlockPos pos = rawPos.immutable();
         revealed.add(pos);
-        if (ORE_BLOCKS.contains(state.getBlock())) {
+        if (ORE_COLORS.containsKey(state.getBlock())) {
             if (displayedOres.add(pos)) newOres++;
         } else {
             displayedOres.remove(pos);
@@ -296,7 +296,7 @@ public final class TrueSight {
     /** 只在真有新矿时提示。晚到的回包算到下一轮提示里。 */
     private static void reportNewOres() {
         if (newOres == 0) return;
-        log("新发现 " + newOres + " 个深层钻石矿,共 " + displayedOres.size() + " 个", ChatFormatting.GREEN);
+        log("新发现 " + newOres + " 个矿,共 " + displayedOres.size() + " 个", ChatFormatting.GREEN);
         newOres = 0;
     }
 
@@ -385,53 +385,54 @@ public final class TrueSight {
         if (!running || level == null || displayedOres.isEmpty()) return;
 
         // 挖掉的当场剔除(客户端预测先于服务器回包)
-        displayedOres.removeIf(pos -> !ORE_BLOCKS.contains(level.getBlockState(pos).getBlock()));
+        displayedOres.removeIf(pos -> !ORE_COLORS.containsKey(level.getBlockState(pos).getBlock()));
         if (displayedOres.isEmpty()) return;
 
         Vec3 cam = ctx.levelState().cameraRenderState.pos;
         ctx.submitNodeCollector().submitCustomGeometry(ctx.poseStack(), TrueSightRenderTypes.ESP_QUADS, (pose, buf) -> {
             for (BlockPos pos : displayedOres) {
-                fillBox(pose, buf, (float) (pos.getX() - cam.x), (float) (pos.getY() - cam.y), (float) (pos.getZ() - cam.z));
+                int color = ORE_COLORS.get(level.getBlockState(pos).getBlock());
+                fillBox(pose, buf, color, (float) (pos.getX() - cam.x), (float) (pos.getY() - cam.y), (float) (pos.getZ() - cam.z));
             }
         });
     }
 
     /** 以 (minX, minY, minZ) 为角的单位立方体,六个面各一个四边形。 */
-    private static void fillBox(PoseStack.Pose pose, VertexConsumer buf, float minX, float minY, float minZ) {
+    private static void fillBox(PoseStack.Pose pose, VertexConsumer buf, int color, float minX, float minY, float minZ) {
         float maxX = minX + 1, maxY = minY + 1, maxZ = minZ + 1;
 
-        vertex(buf, pose, minX, minY, minZ);
-        vertex(buf, pose, maxX, minY, minZ);
-        vertex(buf, pose, maxX, minY, maxZ);
-        vertex(buf, pose, minX, minY, maxZ);
+        vertex(buf, pose, color, minX, minY, minZ);
+        vertex(buf, pose, color, maxX, minY, minZ);
+        vertex(buf, pose, color, maxX, minY, maxZ);
+        vertex(buf, pose, color, minX, minY, maxZ);
 
-        vertex(buf, pose, minX, maxY, minZ);
-        vertex(buf, pose, minX, maxY, maxZ);
-        vertex(buf, pose, maxX, maxY, maxZ);
-        vertex(buf, pose, maxX, maxY, minZ);
+        vertex(buf, pose, color, minX, maxY, minZ);
+        vertex(buf, pose, color, minX, maxY, maxZ);
+        vertex(buf, pose, color, maxX, maxY, maxZ);
+        vertex(buf, pose, color, maxX, maxY, minZ);
 
-        vertex(buf, pose, minX, minY, minZ);
-        vertex(buf, pose, minX, maxY, minZ);
-        vertex(buf, pose, maxX, maxY, minZ);
-        vertex(buf, pose, maxX, minY, minZ);
+        vertex(buf, pose, color, minX, minY, minZ);
+        vertex(buf, pose, color, minX, maxY, minZ);
+        vertex(buf, pose, color, maxX, maxY, minZ);
+        vertex(buf, pose, color, maxX, minY, minZ);
 
-        vertex(buf, pose, minX, minY, maxZ);
-        vertex(buf, pose, maxX, minY, maxZ);
-        vertex(buf, pose, maxX, maxY, maxZ);
-        vertex(buf, pose, minX, maxY, maxZ);
+        vertex(buf, pose, color, minX, minY, maxZ);
+        vertex(buf, pose, color, maxX, minY, maxZ);
+        vertex(buf, pose, color, maxX, maxY, maxZ);
+        vertex(buf, pose, color, minX, maxY, maxZ);
 
-        vertex(buf, pose, minX, minY, minZ);
-        vertex(buf, pose, minX, minY, maxZ);
-        vertex(buf, pose, minX, maxY, maxZ);
-        vertex(buf, pose, minX, maxY, minZ);
+        vertex(buf, pose, color, minX, minY, minZ);
+        vertex(buf, pose, color, minX, minY, maxZ);
+        vertex(buf, pose, color, minX, maxY, maxZ);
+        vertex(buf, pose, color, minX, maxY, minZ);
 
-        vertex(buf, pose, maxX, minY, minZ);
-        vertex(buf, pose, maxX, maxY, minZ);
-        vertex(buf, pose, maxX, maxY, maxZ);
-        vertex(buf, pose, maxX, minY, maxZ);
+        vertex(buf, pose, color, maxX, minY, minZ);
+        vertex(buf, pose, color, maxX, maxY, minZ);
+        vertex(buf, pose, color, maxX, maxY, maxZ);
+        vertex(buf, pose, color, maxX, minY, maxZ);
     }
 
-    private static void vertex(VertexConsumer buf, PoseStack.Pose pose, float x, float y, float z) {
-        buf.addVertex(pose, x, y, z).setColor(HIGHLIGHT_COLOR);
+    private static void vertex(VertexConsumer buf, PoseStack.Pose pose, int color, float x, float y, float z) {
+        buf.addVertex(pose, x, y, z).setColor(color);
     }
 }
