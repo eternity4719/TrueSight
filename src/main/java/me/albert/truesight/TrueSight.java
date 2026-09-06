@@ -30,7 +30,7 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * 从 Baritone 的 TapCommand 搬出来的本体,发包策略按 Paper 反矿透的真实实现设计(见 D:\projects\Canvas 里的
+ * 发包策略按 Paper 反矿透的真实实现设计(见 D:\projects\Canvas 里的
  * ChunkPacketBlockControllerAntiXray / ServerPlayerGameMode.handleBlockBreakAction):
  * <ul>
  *   <li>服务器收到任意挖掘动作包(含 ABORT)都会在 handleBlockBreakAction 末尾调 onPlayerLeftClickBlock →

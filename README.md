@@ -3,8 +3,6 @@
 Fabric 客户端 mod(Minecraft 26.1.2),针对 Paper 系服务端(Paper / Folia / Canvas)的反矿透(Anti-Xray):
 批量发挖掘动作包,让服务器把身边方块的真实状态回给客户端,然后把揭示出来的**深层钻石矿**画成绿色透视方块。
 
-从 Baritone 的 `TapCommand` 拆出来的独立实现,不依赖 Baritone。
-
 ## 用法
 
 ```

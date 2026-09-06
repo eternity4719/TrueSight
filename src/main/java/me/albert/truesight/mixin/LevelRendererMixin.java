@@ -15,7 +15,7 @@ import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
-/** 世界渲染完毕后补画钻石矿高亮(替代 Baritone 的 onRenderPass)。 */
+/** 世界渲染完毕后补画钻石矿高亮。 */
 @Mixin(LevelRenderer.class)
 public class LevelRendererMixin {
 

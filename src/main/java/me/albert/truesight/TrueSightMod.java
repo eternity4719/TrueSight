@@ -10,7 +10,7 @@ import net.fabricmc.fabric.api.client.command.v2.FabricClientCommandSource;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
 
 /**
- * 客户端入口:注册 /truesight 命令(原 Baritone 的 #tpa),断线时停掉扫描线程。
+ * 客户端入口:注册 /truesight 命令,断线时停掉。
  * 用法:/truesight [半径] [每批包数] [休息时间ms],再敲一次关闭。
  */
 public class TrueSightMod implements ClientModInitializer {
