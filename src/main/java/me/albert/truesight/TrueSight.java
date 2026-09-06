@@ -4,9 +4,12 @@ import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.blaze3d.vertex.VertexConsumer;
 import net.minecraft.ChatFormatting;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.multiplayer.ClientLevel;
+import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.client.renderer.MultiBufferSource;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.core.Vec3i;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.protocol.game.ServerboundPlayerActionPacket;
 import net.minecraft.world.level.block.Block;
@@ -14,14 +17,26 @@ import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.Vec3;
 
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * 从 Baritone 的 TapCommand 搬出来的本体:后台线程对周围方块批量发 ABORT_DESTROY_BLOCK 包,
- * 让服务器回传真实方块,再把深层钻石矿画成绿色透视方块。逻辑与原文件一致,只换掉了 Baritone 的日志/渲染接口。
+ * 从 Baritone 的 TapCommand 搬出来的本体,发包策略按 Paper 反矿透的真实实现重写(见 D:\projects\Canvas 里的
+ * ChunkPacketBlockControllerAntiXray / ServerPlayerGameMode.handleBlockBreakAction):
+ * <ul>
+ *   <li>服务器收到任意挖掘动作包(含 ABORT)都会在 handleBlockBreakAction 末尾调 onPlayerLeftClickBlock →
+ *       updateNearbyBlocks,把目标格周围 update-radius(默认 2)范围内、曼哈顿距离 1~2 的 24 格真实方块广播出来
+ *       (不含目标格本身,也不含 (±1,±1,±1) 角)。</li>
+ *   <li>但 handleBlockBreakAction 开头先做 isWithinBlockInteractionRange(pos, 1.0),超出交互距离直接 return,
+ *       钩子根本不跑——所以只对可达的格子发包,远处发了全是白发。</li>
+ *   <li>既然一个包揭 24 格,就不必每格都发:先按点阵 x+3y+8z ≡ 0 (mod 16) 发(穷举验证过这是能盖满全空间的最稀点阵,
+ *       每 16 格发 1 个包),边缘盖不到的再贪心补几个。</li>
+ * </ul>
+ * 揭示出来的深层钻石矿画成绿色透视方块。
  */
 public final class TrueSight {
 
@@ -29,7 +44,7 @@ public final class TrueSight {
     private static final AtomicBoolean isRunning = new AtomicBoolean(false);
     private static Thread workerThread;
 
-    // 可配置参数(默认:半径6,每批40个包,休息100ms = 400包/秒)
+    // 可配置参数(默认:候选半径6,每批40个包,休息100ms = 400包/秒)。半径只是上限,实际受服务器交互距离约束。
     private static int radius = 6;
     private static int batchSize = 40;
     private static long batchSleepMs = 100;
@@ -56,11 +71,32 @@ public final class TrueSight {
             Blocks.DEEPSLATE_COPPER_ORE
     );
 
+    /** 服务器 updateNearbyBlocks(update-radius ≥ 2)对一个目标格揭示的 24 个偏移:曼哈顿距离 1~2。 */
+    private static final List<Vec3i> REVEAL_BALL = buildRevealBall();
+
     private static final Set<BlockPos> displayedOres = new HashSet<>();
     // ARGB:绿色,透明度 0.4
     private static final int HIGHLIGHT_COLOR = 0x6600FF00;
 
     private TrueSight() {
+    }
+
+    private static List<Vec3i> buildRevealBall() {
+        List<Vec3i> ball = new ArrayList<>();
+        for (int dx = -2; dx <= 2; dx++) {
+            for (int dy = -2; dy <= 2; dy++) {
+                for (int dz = -2; dz <= 2; dz++) {
+                    int dist = Math.abs(dx) + Math.abs(dy) + Math.abs(dz);
+                    if (dist >= 1 && dist <= 2) ball.add(new Vec3i(dx, dy, dz));
+                }
+            }
+        }
+        return List.copyOf(ball);
+    }
+
+    /** 点阵 x+3y+8z ≡ 0 (mod 16):每个格子都落在某个点阵点的 REVEAL_BALL 里(含点阵点自己)。 */
+    private static boolean isLatticePoint(BlockPos pos) {
+        return Math.floorMod(pos.getX() + 3 * pos.getY() + 8 * pos.getZ(), 16) == 0;
     }
 
     public static int getBatchSize() {
@@ -120,7 +156,9 @@ public final class TrueSight {
     private static void loop() {
         while (isRunning.get()) {
             try {
-                if (MC.player == null || MC.level == null) {
+                LocalPlayer player = MC.player;
+                ClientLevel level = MC.level;
+                if (player == null || level == null) {
                     Thread.sleep(500);
                     continue;
                 }
@@ -130,58 +168,25 @@ public final class TrueSight {
                     continue;
                 }
 
-                BlockPos center = MC.player.blockPosition();
-                int r = radius;
+                BlockPos center = player.blockPosition();
+                int r = radius + 1;
 
-                // ========== 发包区:前后左右+下面扩1层 ==========
-                int currentBatch = 0;
-                for (int dx = -r - 1; dx <= r + 1; dx++) {
-                    for (int dy = -r - 1; dy <= r; dy++) {
-                        for (int dz = -r - 1; dz <= r + 1; dz++) {
-                            if (!isRunning.get()) break;
-
-                            BlockPos pos = center.offset(dx, dy, dz);
-                            BlockState state = MC.level.getBlockState(pos);
-                            Block block = state.getBlock();
-                            if (block == Blocks.AIR) continue;
-
-                            // 1. 发送 ABORT 包
-                            MC.player.connection.send(new ServerboundPlayerActionPacket(
-                                    ServerboundPlayerActionPacket.Action.ABORT_DESTROY_BLOCK,
-                                    pos,
-                                    Direction.UP
-                            ));
-                            currentBatch++;
-
-                            // 2. 立即检查是不是钻石矿(实时渲染)
-                            BlockState newState = MC.level.getBlockState(pos);
-                            if (ORE_BLOCKS.contains(newState.getBlock())) {
-                                synchronized (displayedOres) {
-                                    displayedOres.add(pos);
-                                }
-                            }
-
-                            if (currentBatch >= batchSize) {
-                                Thread.sleep(batchSleepMs);
-                                currentBatch = 0;
-                            }
-                        }
-                    }
-                }
+                List<BlockPos> targets = planTargets(player, level, center, r);
+                sendAborts(player, targets);
 
                 // ========== 等待服务器响应 ==========
                 Thread.sleep(100);
 
-                // ========== 二次扫描:扩展到和发包区一致(清除假矿) ==========
+                // ========== 扫描:揭示区比发包区多出 2 格 ==========
                 Set<BlockPos> confirmedOres = new HashSet<>();
-                for (int dx = -r - 1; dx <= r + 1; dx++) {
-                    for (int dy = -r - 1; dy <= r; dy++) {
-                        for (int dz = -r - 1; dz <= r + 1; dz++) {
+                int s = r + 2;
+                for (int dx = -s; dx <= s; dx++) {
+                    for (int dy = -s; dy <= s; dy++) {
+                        for (int dz = -s; dz <= s; dz++) {
                             if (!isRunning.get()) break;
 
                             BlockPos pos = center.offset(dx, dy, dz);
-                            BlockState state = MC.level.getBlockState(pos);
-                            if (ORE_BLOCKS.contains(state.getBlock())) {
+                            if (ORE_BLOCKS.contains(level.getBlockState(pos).getBlock())) {
                                 confirmedOres.add(pos);
                             }
                         }
@@ -209,6 +214,81 @@ public final class TrueSight {
                 } catch (InterruptedException ignored) {
                     break;
                 }
+            }
+        }
+    }
+
+    /**
+     * 规划本轮要发包的目标格。可达 = 与服务器同口径的 isWithinBlockInteractionRange(pos, 1.0);
+     * 要揭示的 = 可达且客户端看是非空气的格子;发包点只能选可达格(不可达的服务器直接丢)。
+     */
+    private static List<BlockPos> planTargets(LocalPlayer player, ClientLevel level, BlockPos center, int r) {
+        List<BlockPos> reachable = new ArrayList<>();
+        Set<BlockPos> reachableSet = new HashSet<>();
+        Set<BlockPos> uncovered = new HashSet<>();
+        for (int dx = -r; dx <= r; dx++) {
+            for (int dy = -r; dy <= r; dy++) {
+                for (int dz = -r; dz <= r; dz++) {
+                    BlockPos pos = center.offset(dx, dy, dz);
+                    if (!player.isWithinBlockInteractionRange(pos, 1.0)) continue;
+                    reachable.add(pos);
+                    reachableSet.add(pos);
+                    if (!level.getBlockState(pos).isAir()) uncovered.add(pos);
+                }
+            }
+        }
+
+        // 1. 点阵点全发,一个包揭 24 格
+        List<BlockPos> targets = new ArrayList<>();
+        for (BlockPos pos : reachable) {
+            if (!isLatticePoint(pos)) continue;
+            targets.add(pos);
+            markRevealed(uncovered, pos);
+        }
+
+        // 2. 边缘补漏:点阵点落在可达区外的那些格子,挑一个能多盖几格的可达点补发
+        for (BlockPos q : new ArrayList<>(uncovered)) {
+            if (!uncovered.contains(q)) continue;
+            BlockPos best = null;
+            int bestGain = 0;
+            for (Vec3i v : REVEAL_BALL) {
+                BlockPos p = q.offset(v);
+                if (!reachableSet.contains(p)) continue;
+                int gain = 0;
+                for (Vec3i o : REVEAL_BALL) {
+                    if (uncovered.contains(p.offset(o))) gain++;
+                }
+                if (gain > bestGain) {
+                    best = p;
+                    bestGain = gain;
+                }
+            }
+            if (best == null) continue; // 周围没有任何可达点能揭到它,放弃
+            targets.add(best);
+            markRevealed(uncovered, best);
+        }
+        return targets;
+    }
+
+    private static void markRevealed(Set<BlockPos> uncovered, BlockPos target) {
+        for (Vec3i v : REVEAL_BALL) {
+            uncovered.remove(target.offset(v));
+        }
+    }
+
+    private static void sendAborts(LocalPlayer player, List<BlockPos> targets) throws InterruptedException {
+        int currentBatch = 0;
+        for (BlockPos pos : targets) {
+            if (!isRunning.get()) return;
+            player.connection.send(new ServerboundPlayerActionPacket(
+                    ServerboundPlayerActionPacket.Action.ABORT_DESTROY_BLOCK,
+                    pos,
+                    Direction.UP
+            ));
+            currentBatch++;
+            if (currentBatch >= batchSize) {
+                Thread.sleep(batchSleepMs);
+                currentBatch = 0;
             }
         }
     }
