@@ -1,0 +1,26 @@
+{
+	"schemaVersion": 1,
+	"id": "truesight",
+	"version": "${version}",
+	"name": "TrueSight",
+	"description": "真视:批量发包剥掉反矿透伪装,透视高亮深层钻石矿(/truesight)",
+	"authors": ["Albert"],
+	"license": "MIT",
+	"environment": "client",
+	"entrypoints": {
+		"client": ["me.albert.truesight.TrueSightMod"]
+	},
+	"mixins": [
+		{
+			"config": "truesight.mixins.json",
+			"environment": "client"
+		}
+	],
+	"accessWidener": "truesight.accesswidener",
+	"depends": {
+		"fabricloader": ">=0.19.2",
+		"minecraft": "~26.1.2",
+		"java": ">=25",
+		"fabric-api": "*"
+	}
+}
