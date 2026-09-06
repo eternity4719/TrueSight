@@ -2,6 +2,7 @@ package me.albert.truesight;
 
 import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.blaze3d.vertex.VertexConsumer;
+import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.minecraft.ChatFormatting;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
@@ -14,18 +15,16 @@ import net.minecraft.network.chat.Component;
 import net.minecraft.network.protocol.game.ServerboundPlayerActionPacket;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
-import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.Vec3;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.HashSet;
-import java.util.Iterator;
 import java.util.List;
 import java.util.Set;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * 从 Baritone 的 TapCommand 搬出来的本体,发包策略按 Paper 反矿透的真实实现重写(见 D:\projects\Canvas 里的
+ * 从 Baritone 的 TapCommand 搬出来的本体,发包策略按 Paper 反矿透的真实实现设计(见 D:\projects\Canvas 里的
  * ChunkPacketBlockControllerAntiXray / ServerPlayerGameMode.handleBlockBreakAction):
  * <ul>
  *   <li>服务器收到任意挖掘动作包(含 ABORT)都会在 handleBlockBreakAction 末尾调 onPlayerLeftClickBlock →
@@ -36,19 +35,20 @@ import java.util.concurrent.atomic.AtomicBoolean;
  *   <li>既然一个包揭 24 格,就不必每格都发:先按点阵 x+3y+8z ≡ 0 (mod 16) 发(穷举验证过这是能盖满全空间的最稀点阵,
  *       每 16 格发 1 个包),边缘盖不到的再贪心补几个。</li>
  * </ul>
+ * 整个流程挂在客户端 tick 上走状态机:规划 → 分批发包 → 等回包 → 扫矿 → 歇息,全在主线程,没有线程和 sleep。
  * 揭示出来的深层钻石矿画成绿色透视方块。
  */
 public final class TrueSight {
 
     private static final Minecraft MC = Minecraft.getInstance();
-    private static final AtomicBoolean isRunning = new AtomicBoolean(false);
-    private static Thread workerThread;
 
     // 可配置参数(默认:候选半径6,每批40个包,休息100ms = 400包/秒)。半径只是上限,实际受服务器交互距离约束。
     private static int radius = 6;
     private static int batchSize = 40;
     private static long batchSleepMs = 100;
-    private static final long scanIntervalMs = 250;
+    private static final long SCAN_INTERVAL_MS = 250;
+    /** 最后一批发完后等服务器回包的 tick 数。 */
+    private static final int REPLY_WAIT_TICKS = 2;
 
     // 目标矿石:深层钻石矿
     private static final Set<Block> ORE_BLOCKS = Set.of(Blocks.DEEPSLATE_DIAMOND_ORE);
@@ -74,22 +74,30 @@ public final class TrueSight {
     /** 服务器 updateNearbyBlocks(update-radius ≥ 2)对一个目标格揭示的 24 个偏移:曼哈顿距离 1~2。 */
     private static final List<Vec3i> REVEAL_BALL = buildRevealBall();
 
-    private static final Set<BlockPos> displayedOres = new HashSet<>();
     // ARGB:绿色,透明度 0.4
     private static final int HIGHLIGHT_COLOR = 0x6600FF00;
+
+    // ===== 运行状态(只在客户端主线程读写) =====
+    private static boolean running;
+    /** 本轮还没发出去的目标格。 */
+    private static final ArrayDeque<BlockPos> sendQueue = new ArrayDeque<>();
+    /** 队列已清空、正在等服务器回包,下一步该扫矿。 */
+    private static boolean awaitingReply;
+    private static int cooldownTicks;
+    private static final Set<BlockPos> displayedOres = new HashSet<>();
 
     private TrueSight() {
     }
 
+    public static void init() {
+        ClientTickEvents.END_CLIENT_TICK.register(client -> tick());
+    }
+
     private static List<Vec3i> buildRevealBall() {
         List<Vec3i> ball = new ArrayList<>();
-        for (int dx = -2; dx <= 2; dx++) {
-            for (int dy = -2; dy <= 2; dy++) {
-                for (int dz = -2; dz <= 2; dz++) {
-                    int dist = Math.abs(dx) + Math.abs(dy) + Math.abs(dz);
-                    if (dist >= 1 && dist <= 2) ball.add(new Vec3i(dx, dy, dz));
-                }
-            }
+        for (BlockPos p : BlockPos.betweenClosed(-2, -2, -2, 2, 2, 2)) {
+            int dist = Math.abs(p.getX()) + Math.abs(p.getY()) + Math.abs(p.getZ());
+            if (dist >= 1 && dist <= 2) ball.add(p.immutable());
         }
         return List.copyOf(ball);
     }
@@ -97,6 +105,10 @@ public final class TrueSight {
     /** 点阵 x+3y+8z ≡ 0 (mod 16):每个格子都落在某个点阵点的 REVEAL_BALL 里(含点阵点自己)。 */
     private static boolean isLatticePoint(BlockPos pos) {
         return Math.floorMod(pos.getX() + 3 * pos.getY() + 8 * pos.getZ(), 16) == 0;
+    }
+
+    private static int ticks(long ms) {
+        return (int) Math.max(1, ms / 50);
     }
 
     public static int getBatchSize() {
@@ -115,128 +127,90 @@ public final class TrueSight {
     }
 
     public static void toggle() {
-        if (isRunning.get()) {
+        if (running) {
             stop();
             log("真视已关闭", ChatFormatting.RED);
             return;
         }
-        start();
+        running = true;
         log("真视已开启!半径" + radius + " 每批" + batchSize + "包 休息" + batchSleepMs + "ms", ChatFormatting.GREEN);
         log("使用 /truesight 关闭", ChatFormatting.GRAY);
     }
 
-    private static void log(String msg, ChatFormatting color) {
-        MC.execute(() -> MC.gui.getChat().addClientSystemMessage(Component.literal(msg).withStyle(color)));
-    }
-
-    private static void start() {
-        if (isRunning.get()) return;
-        isRunning.set(true);
-
-        synchronized (displayedOres) {
-            displayedOres.clear();
-        }
-
-        workerThread = new Thread(TrueSight::loop, "TrueSight-Worker");
-        workerThread.setDaemon(true);
-        workerThread.start();
-    }
-
     public static void stop() {
-        isRunning.set(false);
-        if (workerThread != null) {
-            workerThread.interrupt();
-            workerThread = null;
-        }
-        synchronized (displayedOres) {
-            displayedOres.clear();
-        }
+        running = false;
+        sendQueue.clear();
+        awaitingReply = false;
+        cooldownTicks = 0;
+        displayedOres.clear();
     }
 
-    private static void loop() {
-        while (isRunning.get()) {
-            try {
-                LocalPlayer player = MC.player;
-                ClientLevel level = MC.level;
-                if (player == null || level == null) {
-                    Thread.sleep(500);
-                    continue;
-                }
-                // 挖矿时跳过本轮发包
-                if (MC.options.keyAttack.isDown()) {
-                    Thread.sleep(100);
-                    continue;
-                }
+    private static void log(String msg, ChatFormatting color) {
+        MC.gui.getChat().addClientSystemMessage(Component.literal(msg).withStyle(color));
+    }
 
-                BlockPos center = player.blockPosition();
-                int r = radius + 1;
+    // ===== 每 tick 推进一步的状态机 =====
 
-                List<BlockPos> targets = planTargets(player, level, center, r);
-                sendAborts(player, targets);
-
-                // ========== 等待服务器响应 ==========
-                Thread.sleep(100);
-
-                // ========== 扫描:揭示区比发包区多出 2 格 ==========
-                Set<BlockPos> confirmedOres = new HashSet<>();
-                int s = r + 2;
-                for (int dx = -s; dx <= s; dx++) {
-                    for (int dy = -s; dy <= s; dy++) {
-                        for (int dz = -s; dz <= s; dz++) {
-                            if (!isRunning.get()) break;
-
-                            BlockPos pos = center.offset(dx, dy, dz);
-                            if (ORE_BLOCKS.contains(level.getBlockState(pos).getBlock())) {
-                                confirmedOres.add(pos);
-                            }
-                        }
-                    }
-                }
-
-                // 用确认后的结果替换显示列表(清除假矿)
-                synchronized (displayedOres) {
-                    displayedOres.clear();
-                    displayedOres.addAll(confirmedOres);
-                }
-
-                int found = confirmedOres.size();
-                if (found > 0 && isRunning.get()) {
-                    log("发现 " + found + " 个深层钻石矿", ChatFormatting.GREEN);
-                }
-
-                Thread.sleep(scanIntervalMs);
-            } catch (InterruptedException e) {
-                break;
-            } catch (Exception e) {
-                e.printStackTrace();
-                try {
-                    Thread.sleep(1000);
-                } catch (InterruptedException ignored) {
-                    break;
-                }
-            }
+    private static void tick() {
+        LocalPlayer player = MC.player;
+        ClientLevel level = MC.level;
+        if (!running || player == null || level == null) return;
+        if (cooldownTicks > 0) {
+            cooldownTicks--;
+            return;
         }
+        if (!sendQueue.isEmpty()) {
+            sendBatch(player);
+            return;
+        }
+        if (awaitingReply) {
+            awaitingReply = false;
+            refreshOres(level, player.blockPosition());
+            cooldownTicks = ticks(SCAN_INTERVAL_MS);
+            return;
+        }
+        // 挖矿时不发包
+        if (MC.options.keyAttack.isDown()) return;
+        sendQueue.addAll(planTargets(player, level));
+        awaitingReply = true;
+    }
+
+    private static void sendBatch(LocalPlayer player) {
+        for (int i = 0; i < batchSize && !sendQueue.isEmpty(); i++) {
+            player.connection.send(new ServerboundPlayerActionPacket(
+                    ServerboundPlayerActionPacket.Action.ABORT_DESTROY_BLOCK, sendQueue.poll(), Direction.UP));
+        }
+        cooldownTicks = sendQueue.isEmpty() ? REPLY_WAIT_TICKS : ticks(batchSleepMs);
+    }
+
+    /** 扫描:揭示区比发包区多出 2 格,用确认后的结果整体替换显示列表(顺带清掉假矿)。 */
+    private static void refreshOres(ClientLevel level, BlockPos center) {
+        displayedOres.clear();
+        for (BlockPos pos : cube(center, radius + 3)) {
+            if (ORE_BLOCKS.contains(level.getBlockState(pos).getBlock())) displayedOres.add(pos.immutable());
+        }
+        if (displayedOres.isEmpty()) return;
+        log("发现 " + displayedOres.size() + " 个深层钻石矿", ChatFormatting.GREEN);
+    }
+
+    private static Iterable<BlockPos> cube(BlockPos center, int r) {
+        return BlockPos.betweenClosed(center.offset(-r, -r, -r), center.offset(r, r, r));
     }
 
     /**
      * 规划本轮要发包的目标格。可达 = 与服务器同口径的 isWithinBlockInteractionRange(pos, 1.0);
      * 要揭示的 = 可达且客户端看是非空气的格子;发包点只能选可达格(不可达的服务器直接丢)。
      */
-    private static List<BlockPos> planTargets(LocalPlayer player, ClientLevel level, BlockPos center, int r) {
+    private static List<BlockPos> planTargets(LocalPlayer player, ClientLevel level) {
         List<BlockPos> reachable = new ArrayList<>();
-        Set<BlockPos> reachableSet = new HashSet<>();
         Set<BlockPos> uncovered = new HashSet<>();
-        for (int dx = -r; dx <= r; dx++) {
-            for (int dy = -r; dy <= r; dy++) {
-                for (int dz = -r; dz <= r; dz++) {
-                    BlockPos pos = center.offset(dx, dy, dz);
-                    if (!player.isWithinBlockInteractionRange(pos, 1.0)) continue;
-                    reachable.add(pos);
-                    reachableSet.add(pos);
-                    if (!level.getBlockState(pos).isAir()) uncovered.add(pos);
-                }
-            }
+        for (BlockPos p : cube(player.blockPosition(), radius + 1)) {
+            if (!player.isWithinBlockInteractionRange(p, 1.0)) continue;
+            BlockPos pos = p.immutable();
+            reachable.add(pos);
+            if (!level.getBlockState(pos).isAir()) uncovered.add(pos);
         }
+        Set<BlockPos> reachableSet = new HashSet<>(reachable);
 
         // 1. 点阵点全发,一个包揭 24 格
         List<BlockPos> targets = new ArrayList<>();
@@ -249,25 +223,30 @@ public final class TrueSight {
         // 2. 边缘补漏:点阵点落在可达区外的那些格子,挑一个能多盖几格的可达点补发
         for (BlockPos q : new ArrayList<>(uncovered)) {
             if (!uncovered.contains(q)) continue;
-            BlockPos best = null;
-            int bestGain = 0;
-            for (Vec3i v : REVEAL_BALL) {
-                BlockPos p = q.offset(v);
-                if (!reachableSet.contains(p)) continue;
-                int gain = 0;
-                for (Vec3i o : REVEAL_BALL) {
-                    if (uncovered.contains(p.offset(o))) gain++;
-                }
-                if (gain > bestGain) {
-                    best = p;
-                    bestGain = gain;
-                }
-            }
+            BlockPos best = bestSenderFor(q, reachableSet, uncovered);
             if (best == null) continue; // 周围没有任何可达点能揭到它,放弃
             targets.add(best);
             markRevealed(uncovered, best);
         }
         return targets;
+    }
+
+    /** 在能揭到 q 的可达点里挑"顺带还能揭最多未揭格"的那个;没有返回 null。 */
+    private static BlockPos bestSenderFor(BlockPos q, Set<BlockPos> reachableSet, Set<BlockPos> uncovered) {
+        BlockPos best = null;
+        int bestGain = 0;
+        for (Vec3i v : REVEAL_BALL) {
+            BlockPos p = q.offset(v);
+            if (!reachableSet.contains(p)) continue;
+            int gain = 0;
+            for (Vec3i o : REVEAL_BALL) {
+                if (uncovered.contains(p.offset(o))) gain++;
+            }
+            if (gain <= bestGain) continue;
+            best = p;
+            bestGain = gain;
+        }
+        return best;
     }
 
     private static void markRevealed(Set<BlockPos> uncovered, BlockPos target) {
@@ -276,63 +255,29 @@ public final class TrueSight {
         }
     }
 
-    private static void sendAborts(LocalPlayer player, List<BlockPos> targets) throws InterruptedException {
-        int currentBatch = 0;
-        for (BlockPos pos : targets) {
-            if (!isRunning.get()) return;
-            player.connection.send(new ServerboundPlayerActionPacket(
-                    ServerboundPlayerActionPacket.Action.ABORT_DESTROY_BLOCK,
-                    pos,
-                    Direction.UP
-            ));
-            currentBatch++;
-            if (currentBatch >= batchSize) {
-                Thread.sleep(batchSleepMs);
-                currentBatch = 0;
-            }
-        }
-    }
+    // ===== 渲染 =====
 
     /** 渲染线程调用(见 LevelRendererMixin),stack 已乘好相机矩阵,顶点坐标相对相机位置。 */
     public static void onRender(PoseStack stack) {
-        if (!isRunning.get() || MC.player == null || MC.level == null) return;
+        ClientLevel level = MC.level;
+        if (!running || level == null || displayedOres.isEmpty()) return;
+
+        // 挖掉的、邻居有其他矿物(假矿)的当场剔除
+        displayedOres.removeIf(pos -> !ORE_BLOCKS.contains(level.getBlockState(pos).getBlock()) || hasOtherOreNeighbor(level, pos));
+        if (displayedOres.isEmpty()) return;
 
         Vec3 cam = MC.gameRenderer.getMainCamera().position();
         MultiBufferSource.BufferSource bufferSource = MC.renderBuffers().bufferSource();
-        VertexConsumer buf = null;
-
-        synchronized (displayedOres) {
-            Iterator<BlockPos> iterator = displayedOres.iterator();
-            while (iterator.hasNext()) {
-                BlockPos pos = iterator.next();
-
-                // 1. 二次验证:当前确实是深层钻石矿才渲染
-                BlockState state = MC.level.getBlockState(pos);
-                if (!ORE_BLOCKS.contains(state.getBlock())) {
-                    iterator.remove();
-                    continue;
-                }
-
-                // 2. 邻居有其他矿物(非钻石矿)的当假矿,移除并跳过渲染
-                if (hasOtherOreNeighbor(pos)) {
-                    iterator.remove();
-                    continue;
-                }
-
-                // 3. 渲染
-                if (buf == null) buf = bufferSource.getBuffer(TrueSightRenderTypes.ESP_QUADS);
-                fillBox(stack.last(), buf,
-                        (float) (pos.getX() - cam.x), (float) (pos.getY() - cam.y), (float) (pos.getZ() - cam.z));
-            }
+        VertexConsumer buf = bufferSource.getBuffer(TrueSightRenderTypes.ESP_QUADS);
+        for (BlockPos pos : displayedOres) {
+            fillBox(stack.last(), buf, (float) (pos.getX() - cam.x), (float) (pos.getY() - cam.y), (float) (pos.getZ() - cam.z));
         }
-
-        if (buf != null) bufferSource.endBatch(TrueSightRenderTypes.ESP_QUADS);
+        bufferSource.endBatch(TrueSightRenderTypes.ESP_QUADS);
     }
 
-    private static boolean hasOtherOreNeighbor(BlockPos pos) {
+    private static boolean hasOtherOreNeighbor(ClientLevel level, BlockPos pos) {
         for (Direction dir : Direction.values()) {
-            Block neighborBlock = MC.level.getBlockState(pos.relative(dir)).getBlock();
-            if (OTHER_ORE_BLOCKS.contains(neighborBlock)) return true;
+            if (OTHER_ORE_BLOCKS.contains(level.getBlockState(pos.relative(dir)).getBlock())) return true;
         }
         return false;
     }

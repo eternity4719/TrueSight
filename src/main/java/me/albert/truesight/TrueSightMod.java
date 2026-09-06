@@ -17,6 +17,7 @@ public class TrueSightMod implements ClientModInitializer {
 
     @Override
     public void onInitializeClient() {
+        TrueSight.init();
         ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) -> dispatcher.register(
                 ClientCommands.literal("truesight")
                         .executes(ctx -> {
