@@ -39,7 +39,9 @@ TrueSight 不猜、不扫假矿,它用一套精确的**发包策略**让服务�
 - 📦 **一个 jar 通吃 26.1.x / 26.2** —— 不用为每个版本找对应下载
 - ✂️ **极简** —— 一个命令、零配置文件、零线程、唯一一个 mixin
 
-## 📥 安装
+## 📥 下载与安装
+
+下载地址(永恒世界官网):**https://4.mcyyy.com/resources/truesight**
 
 1. 安装 [Fabric Loader](https://fabricmc.net/) 和 [Fabric API](https://modrinth.com/mod/fabric-api)(Minecraft 26.1 及以上)
 2. 把 `truesight-*.jar` 放进 `.minecraft/mods/`
