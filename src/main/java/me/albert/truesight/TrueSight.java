@@ -20,7 +20,10 @@ import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.LevelChunk;
+import net.minecraft.client.renderer.SubmitNodeCollector;
+import net.minecraft.client.renderer.state.level.CameraRenderState;
 import net.minecraft.world.phys.Vec3;
+import org.joml.Vector3f;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -69,11 +72,15 @@ public final class TrueSight {
     /** 判定服务器 update-radius=1 所需的证据:收到这么多距离 1 的更新、且一个距离 2 的都没有。 */
     private static final int RADIUS1_EVIDENCE = 20;
 
-    // 目标矿石 → 高亮颜色(ARGB,透明度 0.4):深层钻石矿绿色,远古残骸橙色
-    private static final Map<Block, Integer> ORE_COLORS = Map.of(
-            Blocks.DEEPSLATE_DIAMOND_ORE, 0x6600FF00,
-            Blocks.ANCIENT_DEBRIS, 0x66FF8000
-    );
+    /** 目标矿石。 */
+    private static final Set<Block> TARGET_ORES = Set.of(Blocks.DEEPSLATE_DIAMOND_ORE, Blocks.ANCIENT_DEBRIS);
+    /** 高亮颜色(ARGB,透明度 0.6):统一亮绿。绿色在灰色深板岩和红色地狱岩上都是对比色,橙色在地狱里和岩浆混在一起看不见。 */
+    private static final int ESP_COLOR = 0x9900FF00;
+    /** 射线颜色(比方块淡一点)和线宽(像素)。 */
+    private static final int TRACER_COLOR = 0x8000FF00;
+    private static final float TRACER_WIDTH = 2.0F;
+    /** 射线起点在相机正前方这么远(以相机为原点),看起来就是从准星射出去。 */
+    private static final float TRACER_START = 0.3F;
 
     /** update-radius=2 时一个目标格揭示的 24 个偏移:曼哈顿距离 1~2。 */
     private static final List<Vec3i> BALL_2 = buildBall(2);
@@ -221,7 +228,7 @@ public final class TrueSight {
         if (!running) return;
         BlockPos pos = rawPos.immutable();
         revealed.add(pos);
-        if (ORE_COLORS.containsKey(state.getBlock())) {
+        if (TARGET_ORES.contains(state.getBlock())) {
             if (displayedOres.add(pos)) newOres++;
         } else {
             displayedOres.remove(pos);
@@ -385,16 +392,32 @@ public final class TrueSight {
         if (!running || level == null || displayedOres.isEmpty()) return;
 
         // 挖掉的当场剔除(客户端预测先于服务器回包)
-        displayedOres.removeIf(pos -> !ORE_COLORS.containsKey(level.getBlockState(pos).getBlock()));
+        displayedOres.removeIf(pos -> !TARGET_ORES.contains(level.getBlockState(pos).getBlock()));
         if (displayedOres.isEmpty()) return;
 
-        Vec3 cam = ctx.levelState().cameraRenderState.pos;
-        ctx.submitNodeCollector().submitCustomGeometry(ctx.poseStack(), TrueSightRenderTypes.ESP_QUADS, (pose, buf) -> {
+        CameraRenderState camera = ctx.levelState().cameraRenderState;
+        Vec3 cam = camera.pos;
+        SubmitNodeCollector collector = ctx.submitNodeCollector();
+        collector.submitCustomGeometry(ctx.poseStack(), TrueSightRenderTypes.ESP_QUADS, (pose, buf) -> {
             for (BlockPos pos : displayedOres) {
-                int color = ORE_COLORS.get(level.getBlockState(pos).getBlock());
-                fillBox(pose, buf, color, (float) (pos.getX() - cam.x), (float) (pos.getY() - cam.y), (float) (pos.getZ() - cam.z));
+                fillBox(pose, buf, ESP_COLOR, (float) (pos.getX() - cam.x), (float) (pos.getY() - cam.y), (float) (pos.getZ() - cam.z));
             }
         });
+        // 原版 Camera 的 FORWARDS 是 (0,0,-1),按相机朝向旋转就是视线方向
+        Vector3f start = new Vector3f(0, 0, -TRACER_START).rotate(camera.orientation);
+        collector.submitCustomGeometry(ctx.poseStack(), TrueSightRenderTypes.ESP_LINES, (pose, buf) -> {
+            for (BlockPos pos : displayedOres) {
+                Vector3f end = new Vector3f((float) (pos.getX() + 0.5 - cam.x), (float) (pos.getY() + 0.5 - cam.y), (float) (pos.getZ() + 0.5 - cam.z));
+                Vector3f dir = end.sub(start, new Vector3f()).normalize();
+                lineVertex(buf, pose, start, dir);
+                lineVertex(buf, pose, end, dir);
+            }
+        });
+    }
+
+    /** 线段顶点:原版 LINES 管线靠 normal 拿线方向、按 setLineWidth 的像素宽度展开。 */
+    private static void lineVertex(VertexConsumer buf, PoseStack.Pose pose, Vector3f p, Vector3f dir) {
+        buf.addVertex(pose, p.x, p.y, p.z).setColor(TRACER_COLOR).setNormal(pose, dir.x, dir.y, dir.z).setLineWidth(TRACER_WIDTH);
     }
 
     /** 以 (minX, minY, minZ) 为角的单位立方体,六个面各一个四边形。 */

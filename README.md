@@ -22,10 +22,10 @@
 普通的 **X-Ray / 矿物透视 / ESP** 在开了反矿透的服务器上只能看到满地假矿:服务器发给你的区块本来就是掺了假的。
 TrueSight 不猜、不扫假矿,它用一套精确的**发包策略**让服务器自己把**真实方块**回传给客户端,再把真矿画成半透明的**透视高亮方块**:
 
-| 矿物 | 颜色 |
-|------|------|
-| 💎 深层钻石矿 Deepslate Diamond Ore | 🟩 绿色 |
-| 🔥 远古残骸 Ancient Debris(下界合金) | 🟧 橙色 |
+- 💎 深层钻石矿 Deepslate Diamond Ore
+- 🔥 远古残骸 Ancient Debris(下界合金 Netherite)
+
+统一用亮绿色高亮,再从准星拉一条射线指向每个矿:绿色在灰色深板岩和红色地狱岩上都是对比色,隔着岩浆也一眼能认出来,射线保证视野外的矿也知道往哪走。
 
 一句话:**反矿透服务器上也能用的钻石透视 / 下界合金透视**。
 
@@ -102,7 +102,7 @@ Gradle + fabric-loom,Java 25:
 |------|------|
 | `TrueSight.java` | 状态机、发包规划、收包登记、渲染(挂 Fabric `LevelRenderEvents`) |
 | `TrueSightMod.java` | 入口,注册 `/truesight` 命令,断线时停掉 |
-| `TrueSightRenderTypes.java` | 透视用的 RenderType(深度测试关掉的填充四边形) |
+| `TrueSightRenderTypes.java` | 透视用的 RenderType(深度测试关掉的填充四边形和射线) |
 | `mixin/ClientPacketListenerMixin.java` | 截获服务器的方块更新包(唯一的 mixin) |
 
 ## ⚖️ 免责声明
