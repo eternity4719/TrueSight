@@ -403,16 +403,28 @@ public final class TrueSight {
                 fillBox(pose, buf, ESP_COLOR, (float) (pos.getX() - cam.x), (float) (pos.getY() - cam.y), (float) (pos.getZ() - cam.z));
             }
         });
-        // 原版 Camera 的 FORWARDS 是 (0,0,-1),按相机朝向旋转就是视线方向
+        // 只给离相机最近的一个矿画射线;原版 Camera 的 FORWARDS 是 (0,0,-1),按相机朝向旋转就是视线方向
+        BlockPos nearest = nearestOre(cam);
         Vector3f start = new Vector3f(0, 0, -TRACER_START).rotate(camera.orientation);
+        Vector3f end = new Vector3f((float) (nearest.getX() + 0.5 - cam.x), (float) (nearest.getY() + 0.5 - cam.y), (float) (nearest.getZ() + 0.5 - cam.z));
+        Vector3f dir = end.sub(start, new Vector3f()).normalize();
         collector.submitCustomGeometry(ctx.poseStack(), TrueSightRenderTypes.ESP_LINES, (pose, buf) -> {
-            for (BlockPos pos : displayedOres) {
-                Vector3f end = new Vector3f((float) (pos.getX() + 0.5 - cam.x), (float) (pos.getY() + 0.5 - cam.y), (float) (pos.getZ() + 0.5 - cam.z));
-                Vector3f dir = end.sub(start, new Vector3f()).normalize();
-                lineVertex(buf, pose, start, dir);
-                lineVertex(buf, pose, end, dir);
-            }
+            lineVertex(buf, pose, start, dir);
+            lineVertex(buf, pose, end, dir);
         });
+    }
+
+    /** displayedOres 非空时离 cam 最近的矿。 */
+    private static BlockPos nearestOre(Vec3 cam) {
+        BlockPos best = null;
+        double bestDist = Double.MAX_VALUE;
+        for (BlockPos pos : displayedOres) {
+            double d = cam.distanceToSqr(pos.getX() + 0.5, pos.getY() + 0.5, pos.getZ() + 0.5);
+            if (d >= bestDist) continue;
+            best = pos;
+            bestDist = d;
+        }
+        return best;
     }
 
     /** 线段顶点:原版 LINES 管线靠 normal 拿线方向、按 setLineWidth 的像素宽度展开。 */
