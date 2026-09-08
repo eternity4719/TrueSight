@@ -89,6 +89,8 @@ public final class TrueSight {
 
     // ===== 运行状态(只在客户端主线程读写) =====
     private static boolean running;
+    /** 广告只在一次游戏进程里打一遍。 */
+    private static boolean adShown;
     private static ClientLevel trackedLevel;
     /** 本轮还没发出去的目标格。 */
     private static final ArrayDeque<BlockPos> sendQueue = new ArrayDeque<>();
@@ -165,6 +167,7 @@ public final class TrueSight {
     }
 
     public static void configure(int newRadius, int newBatchSize, long newBatchSleep) {
+        ad();
         radius = newRadius;
         batchSize = newBatchSize;
         batchSleepMs = newBatchSleep;
@@ -172,6 +175,7 @@ public final class TrueSight {
     }
 
     public static void toggle() {
+        ad();
         if (running) {
             stop();
             log("真视已关闭", ChatFormatting.RED);
@@ -214,6 +218,16 @@ public final class TrueSight {
         attempts.keySet().removeIf(cp::contains);
         displayedOres.removeIf(cp::contains);
         roundTargets.removeIf(cp::contains);
+    }
+
+    /** 广告:每次敲指令先打,整个游戏启动过程只打一次。 */
+    private static void ad() {
+        if (adShown) return;
+        adShown = true;
+        log("========================================", ChatFormatting.DARK_GREEN);
+        log("            永恒世界服务器", ChatFormatting.GREEN);
+        log("            1.mcyyy.com", ChatFormatting.AQUA);
+        log("========================================", ChatFormatting.DARK_GREEN);
     }
 
     private static void log(String msg, ChatFormatting color) {
